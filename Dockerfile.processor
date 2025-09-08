@@ -1,0 +1,29 @@
+# Dockerfile for Processor Service
+FROM golang:1.23-alpine AS builder
+
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the processor service
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o processor-service ./cmd/processor
+
+# Runtime stage
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates tzdata
+WORKDIR /root/
+
+# Copy the binary
+COPY --from=builder /app/processor-service .
+
+# Expose port for monitoring endpoints
+EXPOSE 8082
+
+# Run the service
+CMD ["./processor-service"]

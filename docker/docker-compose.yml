@@ -1,0 +1,237 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16
+    container_name: inventory-postgres
+    environment:
+      POSTGRES_DB: inventory
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d inventory"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - inventory-network
+
+  # Redis Cache and Rate Limiting
+  redis:
+    image: redis:7-alpine
+    container_name: inventory-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - inventory-network
+
+  # Kafka with improved reliability configuration
+  kafka:
+    image: bitnami/kafka:latest
+    container_name: inventory-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft mode configuration
+      KAFKA_CFG_NODE_ID: 0
+      KAFKA_CFG_PROCESS_ROLES: controller,broker
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      
+      # Topic and replication settings
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: true
+      KAFKA_CFG_NUM_PARTITIONS: 3
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: 1
+      
+      # Producer reliability settings (server-side)
+      KAFKA_CFG_ACKS: all                           # Require all replicas to acknowledge
+      KAFKA_CFG_MIN_INSYNC_REPLICAS: 1              # Minimum replicas that must be in sync
+      KAFKA_CFG_ENABLE_IDEMPOTENCE: true            # Enable idempotent producer
+      KAFKA_CFG_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION: 1  # Ensure ordering
+      
+      # Consumer reliability settings
+      KAFKA_CFG_GROUP_INITIAL_REBALANCE_DELAY_MS: 3000     # Delay before first rebalance
+      KAFKA_CFG_SESSION_TIMEOUT_MS: 30000                  # Consumer session timeout
+      KAFKA_CFG_HEARTBEAT_INTERVAL_MS: 10000              # Consumer heartbeat interval
+      
+      # Retention and cleanup
+      KAFKA_CFG_LOG_RETENTION_HOURS: 24                   # Keep logs for 24 hours
+      KAFKA_CFG_LOG_SEGMENT_BYTES: 1073741824            # 1GB log segments
+      KAFKA_CFG_LOG_CLEANUP_POLICY: delete               # Delete old segments
+    volumes:
+      - kafka_data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/9092"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks:
+      - inventory-network
+
+  # Kafka Topic Setup - ensures topics are created before services start
+  kafka-setup:
+    image: bitnami/kafka:latest
+    container_name: inventory-kafka-setup
+    command: |
+      bash -c '
+        echo "Waiting for Kafka to be ready..."
+        while ! kafka-broker-api-versions.sh --bootstrap-server kafka:9092 > /dev/null 2>&1; do
+          echo "Waiting for Kafka..."
+          sleep 2
+        done
+        echo "Kafka is ready. Creating topics..."
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --topic inventory.events --partitions 3 --replication-factor 1 --if-not-exists
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --topic inventory.state --partitions 3 --replication-factor 1 --if-not-exists
+        echo "Topics created successfully"
+        kafka-topics.sh --bootstrap-server kafka:9092 --list
+      '
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - inventory-network
+    restart: "no"
+
+  # Kafka UI for monitoring (optional)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: inventory-kafka-ui
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka-setup:
+        condition: service_completed_successfully
+    networks:
+      - inventory-network
+
+  # Queue Service (API / Producer)
+  queue-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile.queue
+    container_name: inventory-queue-service
+    ports:
+      - "8081:8081"
+    environment:
+      DATABASE_URL: "postgres://postgres:postgres@postgres:5432/inventory?sslmode=disable"
+      KAFKA_BROKERS: "kafka:9092"
+      KAFKA_EVENTS_TOPIC: "inventory.events"
+      KAFKA_STATE_TOPIC: "inventory.state"
+      REDIS_ADDRS: "redis:6379"
+      REDIS_PASSWORD: ""
+      REDIS_DB: 0
+      REDIS_TTL_SEC: 300
+      RATE_LIMIT: 100
+      SERVER_ADDR: "0.0.0.0"
+      SERVER_PORT: "8081"
+      RESERVATION_TTL_SEC: 300
+      SERVICE_NAME: "queue-service"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-setup:
+        condition: service_completed_successfully
+    networks:
+      - inventory-network
+    restart: unless-stopped
+
+  # Processor Service (Worker / Consumer)
+  processor-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile.processor
+    container_name: inventory-processor-service
+    ports:
+      - "8082:8082"
+    environment:
+      DATABASE_URL: "postgres://postgres:postgres@postgres:5432/inventory?sslmode=disable"
+      KAFKA_BROKERS: "kafka:9092"
+      KAFKA_EVENTS_TOPIC: "inventory.events"
+      KAFKA_STATE_TOPIC: "inventory.state"
+      KAFKA_CONSUMER_GROUP: "inventory-processor"
+      REDIS_ADDRS: "redis:6379"
+      REDIS_PASSWORD: ""
+      REDIS_DB: 0
+      REDIS_TTL_SEC: 300
+      SERVER_ADDR: "0.0.0.0"
+      SERVER_PORT: "8082"
+      SERVICE_NAME: "processor-service"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-setup:
+        condition: service_completed_successfully
+    networks:
+      - inventory-network
+    restart: unless-stopped
+
+  # Reader Service (Read / Query Service)
+  reader-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile.reader
+    container_name: inventory-reader-service
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: "postgres://postgres:postgres@postgres:5432/inventory?sslmode=disable"
+      KAFKA_BROKERS: "kafka:9092"
+      KAFKA_EVENTS_TOPIC: "inventory.events"
+      KAFKA_STATE_TOPIC: "inventory.state"
+      KAFKA_CONSUMER_GROUP: "inventory-reader"
+      REDIS_ADDRS: "redis:6379"
+      REDIS_PASSWORD: ""
+      REDIS_DB: 0
+      REDIS_TTL_SEC: 300
+      SERVER_ADDR: "0.0.0.0"
+      SERVER_PORT: "8080"
+      SERVICE_NAME: "reader-service"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - inventory-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  kafka_data:
+
+networks:
+  inventory-network:
+    driver: bridge

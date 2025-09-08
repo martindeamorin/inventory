@@ -1,0 +1,29 @@
+# Dockerfile for Queue Service
+FROM golang:1.23-alpine AS builder
+
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the queue service
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o queue-service ./cmd/queue
+
+# Runtime stage
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates tzdata
+WORKDIR /root/
+
+# Copy the binary
+COPY --from=builder /app/queue-service .
+
+# Expose port
+EXPOSE 8081
+
+# Run the service
+CMD ["./queue-service"]
