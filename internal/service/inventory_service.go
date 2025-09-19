@@ -76,13 +76,13 @@ func (s *InventoryService) ReserveStock(ctx context.Context, sku string, req *mo
 		return nil, err
 	}
 
-	// 2. Perform pre-flight checks
-	if err := s.performPreflightChecks(ctx, sku, req); err != nil {
+	// 2. Check available stock
+	if err := s.checkAvailableStock(ctx, sku, req); err != nil {
 		return nil, err
 	}
 
 	// 3. Check idempotency
-	existingReservation, err := s.checkIdempotency(ctx, req.IdempotencyKey)
+	existingReservation, err := s.reservationAlreadyExists(ctx, req.IdempotencyKey)
 	if err != nil {
 		return nil, fmt.Errorf("idempotency check failed: %w", err)
 	}
@@ -96,7 +96,7 @@ func (s *InventoryService) ReserveStock(ctx context.Context, sku string, req *mo
 		return nil, err
 	}
 
-	// 5. Perform async operations
+	// 5. Invalidate Cache
 	s.invalidateCacheBySku(sku)
 
 	return s.buildReserveResponse(reservation, "Reservation created successfully"), nil
@@ -122,8 +122,7 @@ func (s *InventoryService) validateReserveRequest(sku string, req *models.Reserv
 	return nil
 }
 
-// performPreflightChecks performs stock availability checks
-func (s *InventoryService) performPreflightChecks(ctx context.Context, sku string, req *models.ReserveRequest) error {
+func (s *InventoryService) checkAvailableStock(ctx context.Context, sku string, req *models.ReserveRequest) error {
 	// Stock pre-check
 	if s.config.EnableStockPreCheck {
 		return s.checkStockAvailability(ctx, sku, req.Qty)
@@ -133,7 +132,7 @@ func (s *InventoryService) performPreflightChecks(ctx context.Context, sku strin
 
 // checkStockAvailability checks if there's sufficient stock available
 func (s *InventoryService) checkStockAvailability(ctx context.Context, sku string, qty int) error {
-	available, err := s.cache.GetAvailableStockWithTimeout(ctx, sku, s.config.CacheTimeout)
+	available, err := s.cache.GetAvailableStock(ctx, sku)
 	if err != nil {
 		// Cache miss or timeout - fallback to database check for accurate validation
 		log.Debug().
@@ -171,7 +170,7 @@ func (s *InventoryService) checkStockAvailability(ctx context.Context, sku strin
 }
 
 // checkIdempotency checks for existing reservations with the same idempotency key
-func (s *InventoryService) checkIdempotency(ctx context.Context, idempotencyKey string) (*models.Reservation, error) {
+func (s *InventoryService) reservationAlreadyExists(ctx context.Context, idempotencyKey string) (*models.Reservation, error) {
 	existingReservation, err := s.repo.GetReservationByIdempotencyKey(ctx, idempotencyKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check existing reservation: %w", err)

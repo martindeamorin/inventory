@@ -2,7 +2,6 @@ package interfaces
 
 import (
 	"context"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -37,7 +36,6 @@ type InventoryRepository interface {
 type CacheRepository interface {
 	GetInventory(ctx context.Context, sku string) (*models.Inventory, error)
 	GetAvailableStock(ctx context.Context, sku string) (int, error)
-	GetAvailableStockWithTimeout(ctx context.Context, sku string, timeout time.Duration) (int, error)
 	SetInventory(ctx context.Context, inventory *models.Inventory) error
 	DeleteInventory(ctx context.Context, sku string) error
 	UpdateInventoryFromState(ctx context.Context, state *models.InventoryState) error

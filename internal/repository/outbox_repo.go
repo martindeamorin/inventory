@@ -10,18 +10,24 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 	"github.com/rs/zerolog/log"
+
+	"inventory-service/internal/models"
 )
 
 // OutboxEvent represents an event in the outbox table
+// Now includes fields for event processing tracking and deduplication
 type OutboxEvent struct {
-	ID              int       `db:"id" json:"id"`
-	EventType       string    `db:"event_type" json:"event_type"`
-	Key             string    `db:"key" json:"key"`
-	Payload         string    `db:"payload" json:"payload"`
-	CreatedAt       time.Time `db:"created_at" json:"created_at"`
-	Published       bool      `db:"published" json:"published"`
-	PublishAttempts int       `db:"publish_attempts" json:"publish_attempts"`
-	LastError       *string   `db:"last_error" json:"last_error,omitempty"`
+	ID               int        `db:"id" json:"id"`
+	EventType        string     `db:"event_type" json:"event_type"`
+	Key              string     `db:"key" json:"key"`
+	Payload          string     `db:"payload" json:"payload"`
+	CreatedAt        time.Time  `db:"created_at" json:"created_at"`
+	Published        bool       `db:"published" json:"published"`
+	PublishAttempts  int        `db:"publish_attempts" json:"publish_attempts"`
+	LastError        *string    `db:"last_error" json:"last_error,omitempty"`
+	ConsumedAt       *time.Time `db:"consumed_at" json:"consumed_at,omitempty"`
+	ProcessedBy      *string    `db:"processed_by" json:"processed_by,omitempty"`
+	ProcessingStatus string     `db:"processing_status" json:"processing_status"`
 }
 
 // OutboxRepository handles outbox operations with advisory locking
@@ -79,7 +85,8 @@ func (r *OutboxRepository) ReleaseOutboxLock(ctx context.Context, lockKey int64)
 // Uses FOR UPDATE SKIP LOCKED to prevent conflicts between workers
 func (r *OutboxRepository) FetchOutboxBatchOrdered(ctx context.Context, limit int) ([]OutboxEvent, error) {
 	query := `
-		SELECT id, event_type, key, payload, created_at, published, publish_attempts, last_error
+		SELECT id, event_type, key, payload, created_at, published, publish_attempts, last_error,
+		       consumed_at, processed_by, processing_status
 		FROM outbox
 		WHERE published = false
 		ORDER BY id ASC
@@ -162,8 +169,7 @@ func (r *OutboxRepository) IncrementPublishAttempts(ctx context.Context, id int6
 	query := `
 		UPDATE outbox 
 		SET publish_attempts = publish_attempts + 1,
-		    last_error = $2,
-		    updated_at = NOW()
+		    last_error = $2
 		WHERE id = $1
 	`
 
@@ -222,6 +228,186 @@ func (r *OutboxRepository) InsertOutboxEvent(ctx context.Context, tx *sqlx.Tx, e
 		Str("event_type", eventType).
 		Str("key", key).
 		Msg("Inserted outbox event")
+
+	return nil
+}
+
+// IsEventProcessed checks if an event has already been processed (replaces processed_events table)
+func (r *OutboxRepository) IsEventProcessed(ctx context.Context, eventType, key string) (bool, error) {
+	var exists bool
+	query := `
+		SELECT EXISTS(
+			SELECT 1 FROM outbox 
+			WHERE event_type = $1 AND key = $2 
+			AND processing_status IN ($3, $4)
+		)
+	`
+
+	err := r.db.GetContext(ctx, &exists, query, eventType, key,
+		models.ProcessingStatusConsumed, models.ProcessingStatusProcessed)
+	if err != nil {
+		log.Error().Err(err).
+			Str("event_type", eventType).
+			Str("key", key).
+			Msg("Failed to check if event is processed")
+		return false, fmt.Errorf("failed to check if event is processed: %w", err)
+	}
+
+	return exists, nil
+}
+
+// MarkEventConsumed marks an event as consumed from Kafka
+func (r *OutboxRepository) MarkEventConsumed(ctx context.Context, tx *sqlx.Tx, eventType, key, processedBy string) error {
+	query := `
+		UPDATE outbox 
+		SET processing_status = $1, 
+		    consumed_at = NOW(),
+		    processed_by = $2
+		WHERE event_type = $3 AND key = $4 AND processing_status = $5
+	`
+
+	var executor interface {
+		ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+	}
+
+	if tx != nil {
+		executor = tx
+	} else {
+		executor = r.db
+	}
+
+	result, err := executor.ExecContext(ctx, query,
+		models.ProcessingStatusConsumed, processedBy, eventType, key, models.ProcessingStatusPending)
+	if err != nil {
+		log.Error().Err(err).
+			Str("event_type", eventType).
+			Str("key", key).
+			Str("processed_by", processedBy).
+			Msg("Failed to mark event as consumed")
+		return fmt.Errorf("failed to mark event as consumed: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get affected rows: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		log.Warn().
+			Str("event_type", eventType).
+			Str("key", key).
+			Msg("No pending event found to mark as consumed")
+	}
+
+	return nil
+}
+
+// MarkEventProcessed marks an event as successfully processed
+func (r *OutboxRepository) MarkEventProcessed(ctx context.Context, tx *sqlx.Tx, eventType, key string) error {
+	query := `
+		UPDATE outbox 
+		SET processing_status = $1
+		WHERE event_type = $2 AND key = $3 AND processing_status = $4
+	`
+
+	var executor interface {
+		ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+	}
+
+	if tx != nil {
+		executor = tx
+	} else {
+		executor = r.db
+	}
+
+	result, err := executor.ExecContext(ctx, query,
+		models.ProcessingStatusProcessed, eventType, key, models.ProcessingStatusConsumed)
+	if err != nil {
+		log.Error().Err(err).
+			Str("event_type", eventType).
+			Str("key", key).
+			Msg("Failed to mark event as processed")
+		return fmt.Errorf("failed to mark event as processed: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get affected rows: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		log.Warn().
+			Str("event_type", eventType).
+			Str("key", key).
+			Msg("No consumed event found to mark as processed")
+	}
+
+	return nil
+}
+
+// MarkEventFailed marks an event processing as failed
+func (r *OutboxRepository) MarkEventFailed(ctx context.Context, tx *sqlx.Tx, eventType, key, errorMsg string) error {
+	query := `
+		UPDATE outbox 
+		SET processing_status = $1,
+		    last_error = $2
+		WHERE event_type = $3 AND key = $4 AND processing_status = $5
+	`
+
+	var executor interface {
+		ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+	}
+
+	if tx != nil {
+		executor = tx
+	} else {
+		executor = r.db
+	}
+
+	result, err := executor.ExecContext(ctx, query,
+		models.ProcessingStatusFailed, errorMsg, eventType, key, models.ProcessingStatusConsumed)
+	if err != nil {
+		log.Error().Err(err).
+			Str("event_type", eventType).
+			Str("key", key).
+			Str("error", errorMsg).
+			Msg("Failed to mark event as failed")
+		return fmt.Errorf("failed to mark event as failed: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get affected rows: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		log.Warn().
+			Str("event_type", eventType).
+			Str("key", key).
+			Msg("No consumed event found to mark as failed")
+	}
+
+	return nil
+}
+
+// CleanupOldProcessedEvents removes old processed events to prevent table growth
+// Replaces the old CleanupOldProcessedEvents from InventoryRepository
+func (r *OutboxRepository) CleanupOldProcessedEvents(ctx context.Context, olderThan time.Duration) error {
+	query := `
+		DELETE FROM outbox 
+		WHERE processing_status = $1 
+		AND consumed_at < NOW() - INTERVAL '%d hours'
+	`
+	hours := int(olderThan.Hours())
+
+	result, err := r.db.ExecContext(ctx, fmt.Sprintf(query, hours), models.ProcessingStatusProcessed)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to cleanup old processed outbox events")
+		return fmt.Errorf("failed to cleanup old processed outbox events: %w", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	log.Info().Int64("rows_deleted", rowsAffected).Msg("Cleaned up old processed outbox events")
 
 	return nil
 }

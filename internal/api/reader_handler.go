@@ -51,9 +51,6 @@ func (h *ReaderHandler) SetupReaderRoutes() *gin.Engine {
 	{
 		// Inventory read operations
 		api.GET("/inventory/:sku/availability", h.getAvailability)
-
-		// Batch read operations
-		api.GET("/inventory/batch/availability", h.getBatchAvailability)
 	}
 
 	return r
@@ -95,62 +92,6 @@ func (h *ReaderHandler) getAvailability(c *gin.Context) {
 
 	// Return 200 OK with the availability resource directly
 	Response.Success(c, apiResponse)
-}
-
-// getBatchAvailability handles batch availability requests
-func (h *ReaderHandler) getBatchAvailability(c *gin.Context) {
-	// Get SKUs from query parameter (comma-separated)
-	skusParam := c.Query("skus")
-	if skusParam == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "skus query parameter is required"})
-		return
-	}
-
-	// Split the comma-separated SKUs
-	skus := strings.Split(skusParam, ",")
-
-	// Trim whitespace from each SKU
-	for i, sku := range skus {
-		skus[i] = strings.TrimSpace(sku)
-	}
-
-	if len(skus) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one SKU is required"})
-		return
-	}
-
-	if len(skus) > 100 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Maximum 100 SKUs allowed per batch request"})
-		return
-	}
-
-	// Process each SKU
-	results := make([]interface{}, 0, len(skus))
-
-	for _, sku := range skus {
-		if sku == "" {
-			continue // Skip empty SKUs
-		}
-
-		availability, err := h.readerService.GetAvailability(c.Request.Context(), sku)
-		if err != nil {
-			// Add error result for this SKU
-			results = append(results, gin.H{
-				"sku":   sku,
-				"error": "Failed to retrieve availability",
-			})
-			continue
-		}
-
-		results = append(results, availability)
-	}
-
-	response := gin.H{
-		"total_requested": len(skus),
-		"results":         results,
-	}
-
-	c.JSON(http.StatusOK, response)
 }
 
 // healthCheck handles health check requests

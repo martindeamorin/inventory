@@ -26,6 +26,14 @@ const (
 	EventTypeInventoryState = "inventory_state"
 )
 
+// Processing status for outbox events
+const (
+	ProcessingStatusPending   = "pending"   // Event created but not yet consumed
+	ProcessingStatusConsumed  = "consumed"  // Event consumed from Kafka but not processed
+	ProcessingStatusProcessed = "processed" // Event successfully processed
+	ProcessingStatusFailed    = "failed"    // Event processing failed
+)
+
 // ErrorCode represents standardized error codes
 type ErrorCode string
 
@@ -85,23 +93,19 @@ type Reservation struct {
 }
 
 // OutboxEvent represents the outbox pattern table for reliable event publishing
+// Now also handles event deduplication and processing tracking
 type OutboxEvent struct {
-	ID              int       `db:"id" json:"id"`
-	EventType       string    `db:"event_type" json:"event_type"`
-	Key             string    `db:"key" json:"key"`
-	Payload         string    `db:"payload" json:"payload"`
-	CreatedAt       time.Time `db:"created_at" json:"created_at"`
-	Published       bool      `db:"published" json:"published"`
-	PublishAttempts int       `db:"publish_attempts" json:"publish_attempts"`
-	LastError       *string   `db:"last_error" json:"last_error,omitempty"`
-}
-
-// ProcessedEvent represents events that have been processed to prevent duplicates
-type ProcessedEvent struct {
-	EventID     string    `db:"event_id" json:"event_id"`
-	EventType   string    `db:"event_type" json:"event_type"`
-	SKU         string    `db:"sku" json:"sku"`
-	ProcessedAt time.Time `db:"processed_at" json:"processed_at"`
+	ID               int        `db:"id" json:"id"`
+	EventType        string     `db:"event_type" json:"event_type"`
+	Key              string     `db:"key" json:"key"`
+	Payload          string     `db:"payload" json:"payload"`
+	CreatedAt        time.Time  `db:"created_at" json:"created_at"`
+	Published        bool       `db:"published" json:"published"`
+	PublishAttempts  int        `db:"publish_attempts" json:"publish_attempts"`
+	LastError        *string    `db:"last_error" json:"last_error,omitempty"`
+	ConsumedAt       *time.Time `db:"consumed_at" json:"consumed_at,omitempty"`
+	ProcessedBy      *string    `db:"processed_by" json:"processed_by,omitempty"`
+	ProcessingStatus string     `db:"processing_status" json:"processing_status"`
 }
 
 // InventoryEvent represents events published to Kafka

@@ -137,40 +137,6 @@ curl -X POST http://localhost:8081/api/v1/reservations/550e8400-e29b-41d4-a716-4
   }'
 ```
 
-### **5. Batch Availability Check**
-```bash
-curl -X GET "http://localhost:8080/api/v1/inventory/batch/availability?skus=LAPTOP-001,PHONE-002,TABLET-003"
-```
-
-**Response:**
-```json
-{
-  "results": [
-    {
-      "sku": "LAPTOP-001",
-      "available_qty": 86,
-      "reserved_qty": 7,
-      "cache_hit": true,
-      "last_updated": "0001-01-01T00:00:00Z"
-    },
-    {
-      "sku": "PHONE-002",
-      "available_qty": 50,
-      "reserved_qty": 0,
-      "cache_hit": false,
-      "last_updated": "0001-01-01T00:00:00Z"
-    },
-    {
-      "sku": "TABLET-003",
-      "available_qty": 75,
-      "reserved_qty": 0,
-      "cache_hit": false,
-      "last_updated": "0001-01-01T00:00:00Z"
-    }
-  ],
-  "total_requested": 3
-}
-```
 
 ## 🧪 Running Tests
 

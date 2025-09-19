@@ -94,14 +94,6 @@ func (c *CacheClient) GetAvailableStock(ctx context.Context, sku string) (int, e
 	return inventory.AvailableQty, nil
 }
 
-// GetAvailableStockWithTimeout retrieves available stock with a specific timeout
-func (c *CacheClient) GetAvailableStockWithTimeout(ctx context.Context, sku string, timeout time.Duration) (int, error) {
-	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	return c.GetAvailableStock(timeoutCtx, sku)
-}
-
 // SetInventory stores inventory in cache
 func (c *CacheClient) SetInventory(ctx context.Context, inventory *models.Inventory) error {
 	key := c.inventoryKey(inventory.SKU)

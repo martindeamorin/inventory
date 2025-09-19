@@ -108,13 +108,6 @@ func (c *CacheClient) GetAvailableStock(ctx context.Context, sku string) (int, e
 	return inventory.AvailableQty, nil
 }
 
-func (c *CacheClient) GetAvailableStockWithTimeout(ctx context.Context, sku string, timeout time.Duration) (int, error) {
-	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	return c.GetAvailableStock(timeoutCtx, sku)
-}
-
 func TestCacheClient_GetInventory_Hit(t *testing.T) {
 	// Arrange
 	mockRedis := NewMockRedisClient()
@@ -289,29 +282,11 @@ func TestCacheClient_GetAvailableStockWithTimeout_Success(t *testing.T) {
 	mockRedis.On("Get", mock.Anything, "inventory:CACHED-SKU").Return(string(jsonData), nil)
 
 	// Act
-	stock, err := client.GetAvailableStockWithTimeout(context.Background(), "CACHED-SKU", 5*time.Second)
+	stock, err := client.GetAvailableStock(context.Background(), "CACHED-SKU")
 
 	// Assert
 	assert.NoError(t, err)
 	assert.Equal(t, 100, stock)
-
-	mockRedis.AssertExpectations(t)
-}
-
-func TestCacheClient_GetAvailableStockWithTimeout_Timeout(t *testing.T) {
-	// Arrange
-	mockRedis := NewMockRedisClient()
-	client := NewCacheClient(mockRedis)
-
-	// Simular un timeout haciendo que el mock nunca responda
-	mockRedis.On("Get", mock.Anything, "inventory:SLOW-SKU").Return("", context.DeadlineExceeded)
-
-	// Act
-	stock, err := client.GetAvailableStockWithTimeout(context.Background(), "SLOW-SKU", 1*time.Millisecond)
-
-	// Assert
-	assert.Error(t, err)
-	assert.Equal(t, 0, stock)
 
 	mockRedis.AssertExpectations(t)
 }

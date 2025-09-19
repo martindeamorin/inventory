@@ -24,19 +24,21 @@ import (
 
 // ProcessorService handles inventory events and updates the database
 type ProcessorService struct {
-	repo      *repository.InventoryRepository
-	publisher *kafka.Publisher
-	cache     *redisCache.CacheClient
-	config    *config.Config
+	repo       *repository.InventoryRepository
+	outboxRepo *repository.OutboxRepository
+	publisher  *kafka.Publisher
+	cache      *redisCache.CacheClient
+	config     *config.Config
 }
 
 // NewProcessorService creates a new processor service
-func NewProcessorService(repo *repository.InventoryRepository, publisher *kafka.Publisher, cache *redisCache.CacheClient, cfg *config.Config) *ProcessorService {
+func NewProcessorService(repo *repository.InventoryRepository, outboxRepo *repository.OutboxRepository, publisher *kafka.Publisher, cache *redisCache.CacheClient, cfg *config.Config) *ProcessorService {
 	return &ProcessorService{
-		repo:      repo,
-		publisher: publisher,
-		cache:     cache,
-		config:    cfg,
+		repo:       repo,
+		outboxRepo: outboxRepo,
+		publisher:  publisher,
+		cache:      cache,
+		config:     cfg,
 	}
 }
 
@@ -50,9 +52,14 @@ func (p *ProcessorService) HandleEvent(ctx context.Context, event *models.Invent
 		Msg("Processing inventory event")
 
 	// Check if event has already been processed (deduplication)
-	processed, err := p.repo.IsEventProcessed(ctx, nil, event.EventID)
+	// Use outbox pattern for deduplication instead of processed_events table
+	processed, err := p.outboxRepo.IsEventProcessed(ctx, event.EventType, event.SKU)
 	if err != nil {
-		log.Error().Err(err).Str("event_id", event.EventID).Msg("Failed to check if event is processed")
+		log.Error().Err(err).
+			Str("event_id", event.EventID).
+			Str("event_type", event.EventType).
+			Str("sku", event.SKU).
+			Msg("Failed to check if event is processed")
 		return fmt.Errorf("failed to check if event is processed: %w", err)
 	}
 
@@ -63,6 +70,16 @@ func (p *ProcessorService) HandleEvent(ctx context.Context, event *models.Invent
 			Str("sku", event.SKU).
 			Msg("Event already processed - skipping duplicate")
 		return nil
+	}
+
+	// Mark event as consumed from Kafka
+	if err := p.outboxRepo.MarkEventConsumed(ctx, nil, event.EventType, event.SKU, "processor"); err != nil {
+		log.Error().Err(err).
+			Str("event_id", event.EventID).
+			Str("event_type", event.EventType).
+			Str("sku", event.SKU).
+			Msg("Failed to mark event as consumed")
+		return fmt.Errorf("failed to mark event as consumed: %w", err)
 	}
 
 	switch event.EventType {
@@ -143,7 +160,7 @@ func (p *ProcessorService) handleReserveStock(ctx context.Context, event *models
 	}
 
 	// Mark event as processed within the transaction to prevent duplicates
-	if err := p.repo.MarkEventProcessed(ctx, tx, event); err != nil {
+	if err := p.outboxRepo.MarkEventProcessed(ctx, tx, event.EventType, event.SKU); err != nil {
 		return fmt.Errorf("failed to mark event as processed: %w", err)
 	}
 
@@ -206,7 +223,7 @@ func (p *ProcessorService) handleCommitReserve(ctx context.Context, event *model
 	}
 
 	// Mark event as processed within the transaction to prevent duplicates
-	if err := p.repo.MarkEventProcessed(ctx, tx, event); err != nil {
+	if err := p.outboxRepo.MarkEventProcessed(ctx, tx, event.EventType, event.SKU); err != nil {
 		return fmt.Errorf("failed to mark event as processed: %w", err)
 	}
 
@@ -270,7 +287,7 @@ func (p *ProcessorService) handleReleaseStock(ctx context.Context, event *models
 	}
 
 	// Mark event as processed within the transaction to prevent duplicates
-	if err := p.repo.MarkEventProcessed(ctx, tx, event); err != nil {
+	if err := p.outboxRepo.MarkEventProcessed(ctx, tx, event.EventType, event.SKU); err != nil {
 		return fmt.Errorf("failed to mark event as processed: %w", err)
 	}
 
@@ -340,7 +357,7 @@ func (p *ProcessorService) handleExpireReserve(ctx context.Context, event *model
 	}
 
 	// Mark event as processed within the transaction to prevent duplicates
-	if err := p.repo.MarkEventProcessed(ctx, tx, event); err != nil {
+	if err := p.outboxRepo.MarkEventProcessed(ctx, tx, event.EventType, event.SKU); err != nil {
 		return fmt.Errorf("failed to mark event as processed: %w", err)
 	}
 
@@ -458,8 +475,8 @@ func (p *ProcessorService) runProcessedEventsCleanup(ctx context.Context) {
 			log.Info().Msg("Stopping processed events cleanup routine")
 			return
 		case <-ticker.C:
-			if err := p.repo.CleanupOldProcessedEvents(ctx, 24*time.Hour); err != nil {
-				log.Error().Err(err).Msg("Failed to cleanup old processed events")
+			if err := p.outboxRepo.CleanupOldProcessedEvents(ctx, 24*time.Hour); err != nil {
+				log.Error().Err(err).Msg("Failed to cleanup old processed outbox events")
 			}
 		}
 	}
@@ -584,7 +601,8 @@ func main() {
 
 	cache := initializeCache(cfg)
 	repo := repository.NewInventoryRepository(db)
-	processor := NewProcessorService(repo, publisher, cache, cfg)
+	outboxRepo := repository.NewOutboxRepository(db)
+	processor := NewProcessorService(repo, outboxRepo, publisher, cache, cfg)
 
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())

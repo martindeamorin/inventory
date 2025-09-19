@@ -17,7 +17,6 @@ type InventoryService interface {
 
 	// Query operations
 	GetAvailability(ctx context.Context, sku string) (*models.AvailabilityResponse, error)
-	GetBatchAvailability(ctx context.Context, skus []string) (map[string]*models.AvailabilityResponse, error)
 }
 
 // ProcessorService defines the contract for event processing
@@ -30,5 +29,5 @@ type ProcessorService interface {
 // ReaderService defines the contract for read operations
 type ReaderService interface {
 	GetAvailability(ctx context.Context, sku string) (*models.AvailabilityResponse, error)
-	GetBatchAvailability(ctx context.Context, skus []string) (map[string]*models.AvailabilityResponse, error)
+	vailability(ctx context.Context, skus []string) (map[string]*models.AvailabilityResponse, error)
 }

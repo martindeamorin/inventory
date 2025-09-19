@@ -89,13 +89,16 @@ func (db *MockDB) GetExpiredReservations() []models.Reservation {
 
 func (db *MockDB) CreateOutboxEvent(eventType, key string, payload interface{}) {
 	event := models.OutboxEvent{
-		ID:              db.nextEventID,
-		EventType:       eventType,
-		Key:             key,
-		Payload:         payload.(string),
-		CreatedAt:       time.Now(),
-		Published:       false,
-		PublishAttempts: 0,
+		ID:               db.nextEventID,
+		EventType:        eventType,
+		Key:              key,
+		Payload:          payload.(string),
+		CreatedAt:        time.Now(),
+		Published:        false,
+		PublishAttempts:  0,
+		ConsumedAt:       nil,
+		ProcessedBy:      nil,
+		ProcessingStatus: models.ProcessingStatusPending,
 	}
 	db.outboxEvents = append(db.outboxEvents, event)
 	db.nextEventID++

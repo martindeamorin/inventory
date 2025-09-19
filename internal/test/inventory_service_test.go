@@ -112,11 +112,6 @@ func (m *MockCacheRepository) GetAvailableStock(ctx context.Context, sku string)
 	return args.Int(0), args.Error(1)
 }
 
-func (m *MockCacheRepository) GetAvailableStockWithTimeout(ctx context.Context, sku string, timeout time.Duration) (int, error) {
-	args := m.Called(ctx, sku, timeout)
-	return args.Int(0), args.Error(1)
-}
-
 func (m *MockCacheRepository) SetInventory(ctx context.Context, inventory *models.Inventory) error {
 	args := m.Called(ctx, inventory)
 	return args.Error(0)
