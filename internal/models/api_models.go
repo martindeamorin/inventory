@@ -22,7 +22,6 @@ const (
 	EventTypeReserveStock   = "reserve_stock"
 	EventTypeCommitReserve  = "commit_reserve"
 	EventTypeReleaseStock   = "release_stock"
-	EventTypeReleaseReserve = "release_reserve"
 	EventTypeExpireReserve  = "expire_reserve"
 	EventTypeInventoryState = "inventory_state"
 )

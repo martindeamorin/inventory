@@ -23,7 +23,6 @@ func TestEventTypes_Constants(t *testing.T) {
 	assert.Equal(t, "reserve_stock", models.EventTypeReserveStock)
 	assert.Equal(t, "commit_reserve", models.EventTypeCommitReserve)
 	assert.Equal(t, "release_stock", models.EventTypeReleaseStock)
-	assert.Equal(t, "release_reserve", models.EventTypeReleaseReserve)
 	assert.Equal(t, "expire_reserve", models.EventTypeExpireReserve)
 	assert.Equal(t, "inventory_state", models.EventTypeInventoryState)
 }

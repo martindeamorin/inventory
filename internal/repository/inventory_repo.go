@@ -27,11 +27,6 @@ func NewInventoryRepository(db *sqlx.DB) *InventoryRepository {
 	}
 }
 
-// OutboxRepo returns the outbox repository for direct access to outbox operations
-func (r *InventoryRepository) OutboxRepo() *OutboxRepository {
-	return r.outboxRepo
-}
-
 // GetInventory retrieves inventory by SKU
 func (r *InventoryRepository) GetInventory(ctx context.Context, sku string) (*models.Inventory, error) {
 	var inventory models.Inventory

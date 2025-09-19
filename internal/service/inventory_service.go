@@ -97,7 +97,7 @@ func (s *InventoryService) ReserveStock(ctx context.Context, sku string, req *mo
 	}
 
 	// 5. Perform async operations
-	s.performAsyncOperations(ctx, sku, reservation)
+	s.invalidateCacheBySku(sku)
 
 	return s.buildReserveResponse(reservation, "Reservation created successfully"), nil
 }
@@ -234,7 +234,7 @@ func (s *InventoryService) createReservationTransaction(ctx context.Context, sku
 }
 
 // performAsyncOperations performs cache invalidation and event publishing asynchronously
-func (s *InventoryService) performAsyncOperations(ctx context.Context, sku string, reservation *models.Reservation) {
+func (s *InventoryService) invalidateCacheBySku(sku string) {
 	// Cache invalidation
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -257,22 +257,6 @@ func (s *InventoryService) buildReserveResponse(reservation *models.Reservation,
 		Status:        reservation.Status,
 		ExpiresAt:     reservation.ExpiresAt,
 		Message:       message,
-	}
-}
-
-// buildInventoryEvent builds an inventory event from a reservation
-func (s *InventoryService) buildInventoryEvent(reservation *models.Reservation, eventType string) *models.InventoryEvent {
-	return &models.InventoryEvent{
-		EventID:        uuid.New().String(),
-		EventType:      eventType,
-		SKU:            reservation.SKU,
-		Qty:            reservation.Qty,
-		Version:        0,
-		ReservationID:  &reservation.ReservationID,
-		Status:         reservation.Status,
-		OwnerID:        reservation.OwnerID,
-		IdempotencyKey: reservation.IdempotencyKey,
-		Timestamp:      time.Now(),
 	}
 }
 
@@ -526,53 +510,6 @@ func (s *InventoryService) expireReservation(ctx context.Context, reservation *m
 		Str("reservation_id", reservation.ReservationID.String()).
 		Str("sku", reservation.SKU).
 		Msg("Expired reservation")
-
-	return nil
-}
-
-// PublishOutboxEvents publishes pending outbox events with ordering guarantee
-// DEPRECATED: Use kafka.Publisher.RunOutboxPublisher for better performance and reliability
-func (s *InventoryService) PublishOutboxEvents(ctx context.Context) error {
-	// Acquire advisory lock to ensure only one worker processes outbox at a time
-	const defaultLockKey = int64(1234567890) // Fixed lock ID for outbox
-
-	lockAcquired, err := s.outboxRepo.TryAcquireOutboxLock(ctx, defaultLockKey)
-	if err != nil {
-		return fmt.Errorf("failed to acquire outbox lock: %w", err)
-	}
-
-	if !lockAcquired {
-		log.Debug().Msg("Outbox lock held by another worker, skipping")
-		return nil
-	}
-
-	defer func() {
-		if err := s.outboxRepo.ReleaseOutboxLock(ctx, defaultLockKey); err != nil {
-			log.Error().Err(err).Msg("Failed to release outbox lock")
-		}
-	}()
-
-	events, err := s.repo.GetUnpublishedOutboxEvents(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get unpublished events: %w", err)
-	}
-
-	for _, event := range events {
-		if err := s.publisher.PublishOutboxEvent(ctx, &event); err != nil {
-			log.Error().Err(err).Int("event_id", event.ID).Msg("Failed to publish outbox event")
-
-			// Update error in outbox
-			if updateErr := s.outboxRepo.IncrementPublishAttempts(ctx, int64(event.ID), err.Error()); updateErr != nil {
-				log.Error().Err(updateErr).Int("event_id", event.ID).Msg("Failed to update outbox error")
-			}
-			continue
-		}
-
-		// Mark as published
-		if err := s.outboxRepo.MarkOutboxPublished(ctx, []int64{int64(event.ID)}); err != nil {
-			log.Error().Err(err).Int("event_id", event.ID).Msg("Failed to mark outbox event as published")
-		}
-	}
 
 	return nil
 }
